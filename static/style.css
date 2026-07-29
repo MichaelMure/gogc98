@@ -1,9 +1,16 @@
+html, body {
+  height: 100%;
+}
+
 body {
   background: #008080;
   font-family: Tahoma, "MS Sans Serif", sans-serif;
   font-size: 12px;
   margin: 0;
   padding: 12px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
 }
 
 .win {
@@ -11,6 +18,11 @@ body {
   border: 2px solid;
   border-color: #dfdfdf #000 #000 #dfdfdf;
   box-shadow: inset -1px -1px #808080, inset 1px 1px #fff;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .titlebar {
@@ -21,6 +33,7 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
 }
 
 .titlebar-icon {
@@ -35,6 +48,7 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .legend {
@@ -83,6 +97,7 @@ button:active {
   border-color: #808080 #fff #fff #808080;
   background: #000;
   overflow: hidden;
+  flex-shrink: 0;
 }
 .minimap canvas {
   display: block;
@@ -96,6 +111,7 @@ button:active {
   margin: 0 4px 4px;
   background: #000;
   overflow: hidden;
+  flex-shrink: 0;
 }
 .minimap-viewport {
   position: absolute;
@@ -111,6 +127,7 @@ button:active {
   border-color: #808080 #fff #fff #808080;
   background: #000;
   overflow: hidden;
+  flex-shrink: 0;
 }
 .gc-timeline canvas {
   display: block;
@@ -124,7 +141,8 @@ button:active {
   background: #000;
   border: 1px solid;
   border-color: #808080 #fff #fff #808080;
-  max-height: 85vh;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -138,6 +156,7 @@ button:active {
   font-family: "Courier New", monospace;
   font-size: 11px;
   box-shadow: inset 1px 1px #808080;
+  flex-shrink: 0;
 }
 
 .modal-overlay {

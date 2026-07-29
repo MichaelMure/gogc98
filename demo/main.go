@@ -11,7 +11,7 @@ package main
 import (
 	"time"
 
-	"gogc98/probe"
+	"github.com/MichaelMure/gogc98/probe"
 )
 
 // Go's allocator buckets objects into a span purely by size class,

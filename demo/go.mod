@@ -1,7 +1,7 @@
-module gogc98/demo
+module github.com/MichaelMure/gogc98/demo
 
 go 1.26
 
-replace gogc98/probe => ../probe
+replace github.com/MichaelMure/gogc98/probe => ../probe
 
-require gogc98/probe v0.0.0-00010101000000-000000000000
+require github.com/MichaelMure/gogc98/probe v0.0.0-00010101000000-000000000000

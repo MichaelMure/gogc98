@@ -1,4 +1,4 @@
-module gogc98
+module github.com/MichaelMure/gogc98
 
 go 1.26
 

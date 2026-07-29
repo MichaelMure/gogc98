@@ -2,7 +2,7 @@
 .PHONY: run
 
 run:
-	@trap 'kill 0' EXIT INT TERM; \
+	@trap 'kill 0' EXIT; \
 	GODEBUG=traceallocfree=1 go run . & \
 	sleep 1; \
 	(cd .. && go run .) & \

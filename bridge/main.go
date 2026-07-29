@@ -103,6 +103,7 @@ func consumeSnapshot(state *gcState, r io.Reader) {
 
 type controlMsg struct {
 	Anchor uint64 `json:"anchor"`
+	Freeze bool   `json:"freeze"`
 }
 
 func serveWS(ws *websocket.Conn, state *gcState) {
@@ -117,6 +118,7 @@ func serveWS(ws *websocket.Conn, state *gcState) {
 			view.mu.Lock()
 			view.anchorSet = true
 			view.anchor = msg.Anchor
+			view.wantFreeze = msg.Freeze
 			view.mu.Unlock()
 		}
 	}()

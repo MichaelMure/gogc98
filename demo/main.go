@@ -134,10 +134,7 @@ func main() {
 			}
 		}
 
-		// if i%5000 == 0 {
-		// 	runtime.GC()
-		// }
-		if i%200 == 0 {
+		if i%10 == 0 {
 			time.Sleep(time.Millisecond)
 		}
 	}

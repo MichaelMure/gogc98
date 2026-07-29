@@ -14,6 +14,13 @@ import (
 const (
 	pageSize     = 8192
 	minHeapAlign = 8
+
+	// arenaPages is heapArenaBytes (64MB on typical 64-bit platforms,
+	// see runtime/malloc.go) in page units. Page ids here are relative
+	// to wherever tracing started, not necessarily arena-aligned, so
+	// id/arenaPages is an approximation of which real Go arena a page
+	// falls in -- off by at most one arena, not an exact match.
+	arenaPages = 64 << 20 / pageSize
 )
 
 var sizeClassToSize = [...]uint32{

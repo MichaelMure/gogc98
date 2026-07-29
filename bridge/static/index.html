@@ -7,46 +7,165 @@
 </head>
 <body>
 <div class="win">
-  <div class="titlebar">Golang heap – Allocation and GC</div>
+  <div class="titlebar">Golang heap – Allocator and GC</div>
   <div class="toolbar">
     <button id="freezeBtn">Freeze</button>
+    <button id="learnBtn">? Learn</button>
     <span class="legend">
       <span class="swatch" style="background:hsl(210,65%,55%)"></span>type
       <span class="swatch" style="background:hsl(35,55%,45%)"></span>untyped
-      <span class="swatch" style="background:#181818;border:1px solid #333"></span>empty slot
+      <span class="swatch" style="background:#181818;border:1px solid #333"></span>empty
       <span class="swatch" style="border:2px solid rgba(80,255,120,1)"></span>alloc
       <span class="swatch" style="border:2px solid rgba(255,60,60,1)"></span>freed
+      <span class="swatch" style="background:linear-gradient(90deg,hsl(200,70%,55%),hsl(0,70%,55%))"></span>size
+      <span class="swatch" style="background:red"></span>page fullness
+      <span class="swatch" style="background:#0f0"></span>recent activity
     </span>
   </div>
-  <div class="label-legend">
-    Each row is one 8&nbsp;KB heap page, Go's unit of memory management. The
-    Go allocator only ever puts same-size-class objects in a page (never a
-    mix). Box width is proportional to an object's byte size relative to one
-    page, so a page of many tiny objects looks like a dense strip of
-    slivers, and a single object bigger than one page fills every page it
-    spans edge to edge.
-    <br>
-    row label id: <span style="color:#4a4">green</span> = real page &nbsp;
-    <span style="color:#556">dim</span> = reclaimed/unused
-    <br>
-    annotation: <span style="color:hsl(200,70%,55%)">128B</span> = the size class of objects on this page,
-    colored <span style="color:hsl(200,70%,55%)">blue</span>&ndash;<span style="color:hsl(0,70%,55%)">red</span>
-    by scale (log, 8&nbsp;B&ndash;32&nbsp;KB) &nbsp;
-    <span style="color:#e80">+N</span> = N more objects here aren't individually tracked &nbsp;
-    <span style="color:#88a">i/n</span> = page i of n of one object spanning multiple pages
-  </div>
-  <div class="label-legend">
-    minimap (one tick per tracked page across the whole heap, not just
-    what's currently in view): <span style="color:#cc0">yellow</span> =
-    in the current view &nbsp; <span style="color:#0a0">green</span>
-    (brighter = more recently active) = tracked but elsewhere
-  </div>
-  <div id="minimap" class="minimap"></div>
+  <div id="minimap" class="minimap"><canvas id="minimapCanvas"></canvas></div>
+  <div class="minimap-viewport-track"><div id="minimapViewport" class="minimap-viewport"></div></div>
   <div id="pagesContainer" class="pages-container">
     <canvas id="heapCanvas"></canvas>
   </div>
   <div class="statusbar" id="status">connecting&hellip;</div>
 </div>
+
+<div id="learnOverlay" class="modal-overlay" hidden>
+  <div class="modal">
+    <div class="modal-titlebar">
+      <span>What am I looking at?</span>
+      <button id="closeLearnBtn">×</button>
+    </div>
+    <div class="modal-body">
+
+      <h3>Reading this screen</h3>
+      <p>
+        Each row is one 8&nbsp;KB <b>page</b>, Go's basic unit of memory
+        management. A row's boxes are the objects living on that page,
+        <b>width proportional to their byte size relative to one page</b> &mdash;
+        not a fixed grid cell. A page of a thousand 8-byte objects looks
+        like a dense strip of slivers; a single object bigger than one
+        page fills every page it spans, edge to edge.
+      </p>
+      <p>
+        Row id: <span style="color:#4a4">green</span> means a real tracked
+        page; <span style="color:#556">dim</span> means untracked (see
+        "empty space" below). The right-aligned text is either the page's
+        size class (colored <span style="color:hsl(200,70%,55%)">blue</span>&ndash;<span style="color:hsl(0,70%,55%)">red</span>
+        by scale), <code style="color:#e80">+N</code> meaning N more
+        objects here exist but aren't individually tracked (there's a cap
+        on how much detail gets sent per page, to bound message size),
+        or <code style="color:#88a">i/n</code> meaning this is page i of
+        n belonging to one object bigger than a single page. Occasionally
+        you'll see <code style="color:#556">?B</code> instead &mdash; that
+        page's own allocation event hasn't been seen yet (we first heard
+        about it from one of its objects), so its size class genuinely
+        isn't known yet, not just zero.
+      </p>
+      <p>
+        Box colors are just a hash of the object's Go type, so the same
+        type always gets the same color within one view &mdash; the hue
+        itself carries no meaning. Amber specifically means "untyped":
+        an allocation like a raw <code>[]byte</code> backing array that
+        carries no type info at all. A green outline means just
+        allocated; a fading red outline means just freed (it stays
+        visible briefly so you can actually see frees happening, then
+        disappears).
+      </p>
+      <p>
+        The strip above the page view is a <b>minimap</b>: one tick per
+        tracked page across the <i>entire</i> heap, not just what's
+        currently in view. Yellow = in the current view. Green,
+        brightness scaled by recent activity = tracked but elsewhere.
+      </p>
+      <p>
+        <b>Freeze</b> pauses the heap snapshot itself (nothing changes,
+        fade animations stop) while still letting you scroll around
+        that frozen snapshot &mdash; useful for actually reading a
+        moment instead of it changing under you.
+      </p>
+      <p>
+        Untracked page ids normally render as plain blank rows, one per
+        id, even by the thousands &mdash; that's real information about
+        how much of the heap's reserved address space isn't in use
+        right now. Only a truly enormous run &mdash; large enough that
+        it's almost certainly a jump to a completely different, distant
+        region of address space rather than ordinary unused space &mdash;
+        collapses into a single <code>⋯ N pages unused ⋯</code> row. See
+        "what's actually in that empty space" below for why that
+        distinction is about the best this tool can do.
+      </p>
+
+      <h3>What "the heap" actually is</h3>
+      <p>
+        It's tempting to picture the heap as one big pre-allocated block
+        that Go carves objects out of. It's closer to the opposite: Go's
+        heap is built from <b>arenas</b>, 64&nbsp;MB chunks that get
+        mapped in from the OS on demand as the heap grows. Go actively
+        tries to keep arenas contiguous &mdash; each new one is requested
+        right after the end of the last one &mdash; but that's a request
+        to the OS, not a guarantee. If literally anything else in the
+        process (a C library's own allocator if you're using cgo, a
+        dynamically linked shared library, a direct <code>mmap</code>
+        call, ASLR) has already claimed that exact address range, Go
+        falls back to a completely different, far-away region instead.
+        For a plain Go binary, that's rare &mdash; Go
+        deliberately spreads its fallback addresses about 1&nbsp;TB
+        apart specifically to avoid this &mdash; but it's not
+        architecturally impossible.
+      </p>
+      <p>
+        Within one contiguous run, page ids in this tool <i>are</i>
+        literally adjacent bytes 8&nbsp;KB apart: id 123 really is right
+        after id 122 in virtual memory, because the id here is computed directly
+        from real relative addresses, not just an arbitrary counter.
+      </p>
+      <p>
+        What's actually in that empty space? Almost always: address
+        space Go has already reserved for the current arena but hasn't
+        handed out to any span yet &mdash; not a hole, just unused. This
+        tool can't directly tell that apart from a genuine jump to a
+        different, non-contiguous arena (both just look like "nothing
+        tracked here"), so it uses size as a proxy: only a gap in the
+        millions of pages &mdash; far beyond what one contiguous arena
+        run would plausibly leave unused, and approaching the ~1&nbsp;TB
+        spacing Go uses between its fallback addresses &mdash; collapses
+        into a single <code>⋯ pages unused ⋯</code> row. Anything smaller,
+        even thousands of pages, renders as ordinary blank rows, because
+        that's still likely the mundane kind and is worth being able to
+        actually see.
+      </p>
+      <p>
+        One more thing worth knowing: <b>adjacency doesn't mean
+        relatedness</b>. Go's page allocator picks free page ranges via
+        a best-fit-style search over its free list, not by simply
+        appending after the last allocation. Two neighboring rows in
+        this view can be totally unrelated spans &mdash; different
+        types, different ages, allocated at completely different times
+        &mdash; that just happen to have landed next to each other.
+      </p>
+
+      <h3>Pages, spans, and size classes</h3>
+      <p>
+        A <b>span</b> is one or more contiguous pages handed to the
+        allocator to hold objects of exactly <i>one</i> size class. Go
+        rounds every small allocation up to one of ~67 fixed size
+        classes (8, 16, 24, 32, 48&hellip; up to 32768 bytes) instead of
+        packing objects at their exact requested size. That's the whole
+        reason every box in a row is the same size class &mdash; a page
+        never mixes them &mdash; and it's a deliberate tradeoff: a
+        little wasted space per object (the gap between a requested size
+        and its rounded-up class) buys much simpler, faster bookkeeping
+        and lets same-size objects share pages cleanly. Objects bigger
+        than 32&nbsp;KB skip size classes entirely and get a dedicated
+        span sized to exactly cover them, rounded up to whole pages
+        &mdash; that's the <code>i/n</code> case above.
+      </p>
+
+    </div>
+  </div>
+</div>
+
 <script src="/app.js"></script>
 </body>
 </html>

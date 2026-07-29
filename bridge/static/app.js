@@ -3,31 +3,55 @@
 // state.userScrolled becomes true on the first scroll -- from then on
 // the server never moves the view on its own, and a reconnect resends
 // the anchor instead of letting the server redo its one-time initial
-// jump over the user's scroll position.
+// jump over the user's scroll position. state.frozen just mirrors
+// what was last sent to the server -- freezing itself (holding the
+// heap data still while still letting the window scroll) happens
+// server-side, see viewMode in frame.go.
 const state = { anchor: 0, userScrolled: false, frozen: false };
 
-// See the minimap brightness smoothing in render() for why this
-// exists instead of just taking each frame's max directly.
-let minimapMaxActivity = 1;
-const MINIMAP_MAX_DECAY = Math.pow(0.5, 0.15 / 15); // half-life ~15s at the 150ms frame rate
+// A span counts as "recently active" if something touched it within
+// this many seconds. Deliberately a direct wall-clock check on
+// lastEventSeconds, not a threshold on the decayed `activity` score:
+// that score is cumulative, so one burst can push it into the
+// hundreds or thousands and it then takes many seconds to decay back
+// down even with nothing further happening -- a threshold on it read
+// as "active" for almost everything, almost permanently.
+const MINIMAP_RECENT_SECONDS = 2;
+
+// Minimum pixel width for the viewport marker (see render()) -- not
+// used for minimap ticks, those are single canvas pixel columns now.
+const MINIMAP_VIEWPORT_MIN_WIDTH = 2;
 
 const minimapEl = document.getElementById('minimap');
+const minimapCanvasEl = document.getElementById('minimapCanvas');
+const minimapCtx = minimapCanvasEl.getContext('2d');
+const minimapViewportEl = document.getElementById('minimapViewport');
 const statusEl = document.getElementById('status');
 const freezeBtn = document.getElementById('freezeBtn');
+const learnBtn = document.getElementById('learnBtn');
+const learnOverlay = document.getElementById('learnOverlay');
+const closeLearnBtn = document.getElementById('closeLearnBtn');
+
+learnBtn.onclick = () => { learnOverlay.hidden = false; };
+closeLearnBtn.onclick = () => { learnOverlay.hidden = true; };
+learnOverlay.onclick = (e) => {
+  if (e.target === learnOverlay) learnOverlay.hidden = true;
+};
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') learnOverlay.hidden = true;
+});
 
 let ws;
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.onopen = () => {
     console.log('gogc98: connected');
-    // Only resend an anchor if the user actually took control already
-    // -- otherwise let the fresh server-side view do its own one-time
+    // Only resend state if the user actually took control already --
+    // otherwise let the fresh server-side view do its own one-time
     // jump to the first populated page, same as any new connection.
-    if (state.userScrolled) send({ anchor: state.anchor });
+    if (state.userScrolled || state.frozen) send({ anchor: state.anchor, freeze: state.frozen });
   };
-  ws.onmessage = (ev) => {
-    if (!state.frozen) render(JSON.parse(ev.data));
-  };
+  ws.onmessage = (ev) => render(JSON.parse(ev.data));
   ws.onclose = () => {
     console.log('gogc98: disconnected, reconnecting in 1s');
     statusEl.textContent = 'disconnected — retrying...';
@@ -44,21 +68,21 @@ function send(msg) {
 freezeBtn.onclick = () => {
   state.frozen = !state.frozen;
   freezeBtn.textContent = state.frozen ? 'Unfreeze' : 'Freeze';
+  send({ anchor: state.anchor, freeze: state.frozen });
 };
 
 // Mouse-wheel panning over the view. preventDefault + non-passive so
 // this replaces the browser's native scroll instead of fighting it.
-// Ignored while frozen, so unfreezing always resumes exactly where it
-// left off instead of jumping to wherever a blind scroll landed.
+// Still works while frozen -- the server keeps navigating a frozen
+// snapshot of the heap rather than blocking movement entirely.
 document.getElementById('pagesContainer').addEventListener(
   'wheel',
   (e) => {
     e.preventDefault();
-    if (state.frozen) return;
     state.userScrolled = true;
     const step = Math.sign(e.deltaY) * Math.max(1, Math.round(Math.abs(e.deltaY) / 20));
     state.anchor = Math.max(0, state.anchor + step);
-    send({ anchor: state.anchor });
+    send({ anchor: state.anchor, freeze: state.frozen });
   },
   { passive: false }
 );
@@ -186,40 +210,81 @@ function render(frame) {
   heapCtx.font = '8px monospace';
   heapCtx.textBaseline = 'middle';
 
-  const byId = new Map(frame.pages.map((p) => [p.id, p]));
+  // Rows are self-describing now (kind: "page" | "void" | "gap"),
+  // sent in top-to-bottom order -- unlike the old windowStart+row
+  // scheme, one row doesn't always correspond to one page id, since a
+  // long run of untracked ids collapses into a single "gap" row (see
+  // buildRows in frame.go). So this just draws frame.rows in order,
+  // it doesn't compute ids itself.
+  for (let i = 0; i < frame.rows.length; i++) {
+    const row = frame.rows[i];
+    const y = i * CELL;
 
-  for (let row = 0; row < frame.windowCount; row++) {
-    const id = frame.windowStart + row;
-    const y = row * CELL;
-
-    const page = byId.get(id);
-    if (!page) {
-      // Reclaimed/never-allocated: dim, not green -- a void row must
-      // not look like it holds a real page, only its id is known.
-      drawLabel(id, LABEL_DIM, y);
+    if (row.kind === 'void') {
+      // Untracked, but not long enough a run to collapse: dim, not
+      // green -- a void row must not look like it holds a real page,
+      // only its id is known.
+      drawLabel(row.id, LABEL_DIM, y);
       heapCtx.fillStyle = '#0a0a0a';
       heapCtx.fillRect(LABEL_WIDTH, y, rowWidth, CELL);
       continue;
     }
 
-    const nelems = page.nelems || 0;
+    if (row.kind === 'gap') {
+      // Collapsed into one row because it's huge -- see
+      // gapCollapseThreshold in frame.go for why only gaps at this
+      // scale get collapsed. Ordinary unused-but-reserved space (even
+      // thousands of pages) renders as plain blank rows instead, since
+      // that's real, scrollable information about the heap's layout,
+      // not noise.
+      drawLabel(row.id, LABEL_DIM, y);
+      heapCtx.fillStyle = '#0a0a0a';
+      heapCtx.fillRect(LABEL_WIDTH, y, rowWidth, CELL);
+      heapCtx.textAlign = 'center';
+      heapCtx.fillStyle = LABEL_DIM;
+      heapCtx.fillText(`⋯ ${row.gapLen.toLocaleString()} pages unused ⋯`, LABEL_WIDTH + rowWidth / 2, y + CELL / 2);
+      continue;
+    }
+
+    if (row.kind === 'end') {
+      // Nothing tracked anywhere at or beyond this id -- the server
+      // stops the frame here rather than padding out fake rows, so
+      // this is always the last row actually drawn.
+      drawLabel(row.id, LABEL_DIM, y);
+      heapCtx.fillStyle = '#0a0a0a';
+      heapCtx.fillRect(LABEL_WIDTH, y, rowWidth, CELL);
+      heapCtx.textAlign = 'center';
+      heapCtx.fillStyle = LABEL_DIM;
+      heapCtx.fillText('⋯ nothing tracked beyond here ⋯', LABEL_WIDTH + rowWidth / 2, y + CELL / 2);
+      break;
+    }
+
+    const nelems = row.nelems || 0;
     const shown = Math.min(nelems, serverSlotCap);
     const truncated = nelems > shown;
-    const sizeSeg = { text: `${page.elemSize}B`, color: sizeColor(page.elemSize) };
+    // elemSize is 0 when this span's own Span/SpanAlloc event hasn't
+    // arrived yet (its size class genuinely isn't known yet, not just
+    // zero) -- most often because we first heard about it from one of
+    // its objects instead. Say so plainly rather than showing a
+    // meaningless "0B".
+    const sizeSeg = row.elemSize
+      ? { text: `${row.elemSize}B`, color: sizeColor(row.elemSize) }
+      : { text: '?B', color: LABEL_DIM };
 
-    // The size is always shown, so a row's kind of page is legible
-    // regardless of whatever else is going on. Truncation is flagged
+    // The size is shown by default, so a row's kind of page is legible
+    // regardless of what else is going on. Truncation is flagged
     // alongside it rather than replacing it -- a page could otherwise
     // be hiding hundreds of untracked objects (small size classes go
     // up to 1024 per page), and losing the size while flagging that
-    // would be a step backwards. A continuation row additionally shows
-    // its place in the span.
-    if (truncated) {
-      drawLabel(id, LABEL_ACTIVE, y, sizeSeg, { text: `+${nelems - shown}`, color: LABEL_WARN });
-    } else if (page.pageOffset > 0) {
-      drawLabel(id, LABEL_ACTIVE, y, sizeSeg, { text: `${page.pageOffset + 1}/${page.pageCount}`, color: LABEL_CONTINUATION });
+    // would be a step backwards. A continuation row shows its place in
+    // the span instead -- the size class is already established by
+    // that same span's base row, just above.
+    if (row.pageOffset > 0) {
+      drawLabel(row.id, LABEL_ACTIVE, y, { text: `${row.pageOffset + 1}/${row.pageCount}`, color: LABEL_CONTINUATION });
+    } else if (truncated) {
+      drawLabel(row.id, LABEL_ACTIVE, y, sizeSeg, { text: `+${nelems - shown}`, color: LABEL_WARN });
     } else {
-      drawLabel(id, LABEL_ACTIVE, y, sizeSeg);
+      drawLabel(row.id, LABEL_ACTIVE, y, sizeSeg);
     }
 
     // Every row -- base or continuation -- draws its own fragments,
@@ -230,7 +295,7 @@ function render(frame) {
     // as one solid box spanning every row it occupies, at the same
     // full opacity and color as any other box -- no separate
     // "continuation" fill style needed.
-    for (const frag of page.objects || []) {
+    for (const frag of row.objects || []) {
       const bx = LABEL_WIDTH + frag.xFrac * rowWidth;
       const bw = Math.max(1, frag.widthFrac * rowWidth);
       if (!frag.status || frag.status === 'freed') {
@@ -252,32 +317,124 @@ function render(frame) {
     }
   }
 
-  minimapEl.innerHTML = '';
-  // Snap up immediately to a new high (so a genuinely more active
-  // moment shows right away), but only decay back down slowly (~15s
-  // half-life). Normalizing against the raw instantaneous max instead
-  // made brightness swing on every frame, since it's rescaled against
-  // whatever the single hottest span anywhere happens to be doing that
-  // instant -- not because any given span's own activity changed.
-  const currentMax = Math.max(1, ...frame.summary.map((s) => s.activity));
-  minimapMaxActivity = Math.max(currentMax, minimapMaxActivity * MINIMAP_MAX_DECAY);
-
-  const visibleIds = new Set(frame.pages.map((p) => p.id));
-  for (const s of frame.summary) {
-    const tick = document.createElement('div');
-    tick.className = 'tick';
-    const intensity = Math.min(1, s.activity / minimapMaxActivity);
-    tick.style.background = visibleIds.has(s.id)
-      ? '#ff0'
-      : `rgba(0,120,0,${0.15 + intensity * 0.85})`;
-    minimapEl.appendChild(tick);
+  // Position, not count, is what a map should encode: each tick sits
+  // at a fixed spot derived from its own real page id (min..max of
+  // currently tracked ids, same idea as everywhere else in this tool
+  // -- position always reflects real address, never "index among
+  // however many things happen to exist right now"). A span appearing
+  // or disappearing elsewhere then just adds or removes one mark at
+  // its own spot; it can't resize or re-space anything else, which is
+  // what tiling N equal-width ticks edge to edge was doing before --
+  // that's why the strip kept visibly "growing" and "shrinking" no
+  // matter how the count feeding it was smoothed.
+  // minId is always 0, the true start of the id space -- not the
+  // first *tracked* id. The main page view can scroll all the way
+  // down to real id 0 (as void/gap rows before anything tracked
+  // starts), so the minimap needs the same reference point or "the
+  // beginning" in one view isn't the same position as in the other,
+  // which is what made every previous version of this wrong: they all
+  // anchored the strip's left edge to the first tracked span instead,
+  // so id 0 wasn't representable in the minimap's own coordinate
+  // system at all. maxId comes only from the tracked range (stable,
+  // barely changes -- see the earlier trackedSpans-vs-idSpan
+  // measurements), falling back to the current window's end only when
+  // nothing is tracked yet at all, just to avoid a zero-width domain
+  // -- not extended for scroll position the way an earlier version
+  // tried, since that reintroduces the same shifting-domain problem
+  // on the far end. Since windowStart can never go below 0 either
+  // (the wheel handler already clamps that), this whole domain --
+  // and therefore every tick's position -- never needs to shift for
+  // scrolling to stay representable. Scrolling past the last tracked
+  // page just pins the viewport marker at the right edge instead (see
+  // below).
+  const lastRow = frame.rows[frame.rows.length - 1];
+  let windowEndId = frame.windowStart;
+  if (lastRow) {
+    windowEndId = lastRow.kind === 'gap' ? lastRow.id + lastRow.gapLen : lastRow.id + 1;
   }
+  const ids = frame.summary.map((s) => s.id);
+  const minId = 0;
+  const maxId = ids.length ? Math.max(...ids) : windowEndId;
+  const idSpan = Math.max(1, maxId - minId);
+  const stripWidth = minimapEl.clientWidth;
+  const stripHeight = minimapEl.clientHeight;
+  const idToX = (id) => ((id - minId) / idSpan) * (stripWidth - 1);
+
+  // Drawn on canvas, one pixel column at a time, rather than one DOM
+  // element per tracked page positioned by left px: with a tracked id
+  // range easily in the thousands spread across a strip a fraction of
+  // that many pixels wide, most ids map to the very same pixel, and
+  // separate absolutely-positioned elements would just silently stack
+  // -- only the last one drawn (highest id) stays visible, hiding
+  // everything else at that spot, most often a span's own
+  // continuation pages since they sit at adjacent ids right next to
+  // whatever's drawn after them. Bucketing by pixel column instead
+  // means every tracked page actually contributes to what's shown,
+  // none of them silently lost to draw order.
+  // Each summary entry is exactly one page wide in id-space, so its
+  // real extent on the strip is [idToX(id), idToX(id+1)) -- filling
+  // that whole range, not just a single rounded point, matters
+  // whenever the tracked range is narrow enough that one id covers
+  // more than a pixel: otherwise consecutive real ids can round to
+  // non-adjacent pixels, leaving a 1px black gap between pages that
+  // are genuinely contiguous (no gap at all in the main view).
+  const pxWidth = Math.max(1, Math.round(stripWidth));
+  const bucketFull = new Float64Array(pxWidth);
+  const bucketActive = new Uint8Array(pxWidth);
+  for (const s of frame.summary) {
+    const x0 = Math.min(pxWidth - 1, Math.max(0, Math.floor(idToX(s.id))));
+    const x1 = Math.max(x0, Math.min(pxWidth - 1, Math.ceil(idToX(s.id + 1)) - 1));
+    const full = Math.min(1, s.fullness);
+    const active = s.lastEventSeconds < MINIMAP_RECENT_SECONDS;
+    for (let x = x0; x <= x1; x++) {
+      bucketFull[x] = Math.max(bucketFull[x], full);
+      if (active) bucketActive[x] = 1;
+    }
+  }
+  minimapCanvasEl.width = pxWidth;
+  minimapCanvasEl.height = Math.max(1, Math.round(stripHeight));
+  minimapCtx.fillStyle = '#000';
+  minimapCtx.fillRect(0, 0, minimapCanvasEl.width, minimapCanvasEl.height);
+  // One scalar (fullness) drives brightness; whether anything in that
+  // column changed recently just picks the hue -- green if so, red if
+  // not -- rather than trying to blend two independent magnitudes
+  // into one color, which made "how full" and "how active" hard to
+  // read apart from each other (and, normalized against a global max,
+  // made ordinary real activity nearly invisible next to rare bursts).
+  // Nothing there at all (0 fullness, never active) fades to black,
+  // which is also the background.
+  for (let x = 0; x < pxWidth; x++) {
+    if (bucketFull[x] === 0) continue;
+    const v = Math.round(bucketFull[x] * 255);
+    minimapCtx.fillStyle = bucketActive[x] ? `rgb(0,${v},0)` : `rgb(${v},0,0)`;
+    minimapCtx.fillRect(x, 0, 1, minimapCanvasEl.height);
+  }
+
+  // The current viewport is its own thin indicator underneath the
+  // strip, rather than recoloring whichever ticks happen to be in
+  // range -- so it reads as "here's where you're looking" without
+  // competing with, or being confused for, a tick's own fullness/
+  // activity color. Width comes from the real id span of the current
+  // view relative to the tracked range, computed before any clamping
+  // so it stays at its true size; only position gets clamped into the
+  // strip afterward, same as a normal scrollbar thumb -- scrolling
+  // past either end of the tracked range slides it flush against that
+  // edge and leaves it there, it doesn't keep moving (there's nowhere
+  // meaningful left for it to go without redefining what the strip
+  // represents, which is exactly what caused the zoom-while-scrolling
+  // bug above).
+  const vpWidth = Math.min(stripWidth, Math.max(MINIMAP_VIEWPORT_MIN_WIDTH, ((windowEndId - frame.windowStart) / idSpan) * stripWidth));
+  const vpLeft = Math.min(stripWidth - vpWidth, Math.max(0, idToX(frame.windowStart)));
+  minimapViewportEl.style.left = `${vpLeft}px`;
+  minimapViewportEl.style.width = `${vpWidth}px`;
 
   const m = frame.metrics;
   statusEl.textContent =
     `events: ${m.totalEvents.toLocaleString()}  |  ` +
     `allocs/s: ${m.allocsPerSec.toFixed(0)}  |  ` +
     `frees/s: ${m.freesPerSec.toFixed(0)}  |  ` +
+    `arenas: ${m.trackedArenaBlocks}  |  ` +
     `spans: ${m.trackedSpans}  |  ` +
+    `pages: ${m.trackedPages.toLocaleString()}  |  ` +
     `${state.frozen ? 'frozen' : 'live'}`;
 }

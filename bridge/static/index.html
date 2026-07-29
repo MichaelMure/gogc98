@@ -8,10 +8,10 @@
 </head>
 <body>
 <div class="win">
-  <div class="titlebar">Golang heap – Allocator and GC</div>
+  <div class="titlebar"><img src="/favicon.svg" class="titlebar-icon" alt="">Golang heap – Allocator and GC</div>
   <div class="toolbar">
-    <button id="freezeBtn">Freeze</button>
-    <button id="learnBtn">? Learn</button>
+    <button id="freezeBtn" title="Shortcut: F"><u>F</u>reeze</button>
+    <button id="learnBtn" title="Shortcut: ?"><u>?</u> Learn</button>
     <span class="legend">
       <span class="swatch" style="background:hsl(210,65%,55%)"></span>type
       <span class="swatch" style="background:hsl(35,55%,45%)"></span>untyped
@@ -19,10 +19,12 @@
       <span class="swatch" style="border:2px solid rgba(80,255,120,1)"></span>alloc
       <span class="swatch" style="border:2px solid rgba(255,60,60,1)"></span>freed
       <span class="swatch" style="background:linear-gradient(90deg,hsl(200,70%,55%),hsl(0,70%,55%))"></span>size
+      <span class="legend-sep"></span>
       <span class="swatch" style="background:red"></span>page fullness
       <span class="swatch" style="background:#0f0"></span>recent activity
     </span>
   </div>
+  <div id="gcTimeline" class="gc-timeline" title="GC cycle starts, most recent at the right edge"><canvas id="gcTimelineCanvas"></canvas></div>
   <div id="minimap" class="minimap"><canvas id="minimapCanvas"></canvas></div>
   <div class="minimap-viewport-track"><div id="minimapViewport" class="minimap-viewport"></div></div>
   <div id="pagesContainer" class="pages-container">

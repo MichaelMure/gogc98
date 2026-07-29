@@ -48,9 +48,10 @@ type viewMode struct {
 // it -- so a frozen frame's fade animations stop advancing too,
 // instead of freezing the objects but not their ages.
 type frozenSnapshot struct {
-	at      time.Time
-	spans   map[uint64]*span
-	metrics metricsJSON
+	at       time.Time
+	spans    map[uint64]*span
+	metrics  metricsJSON
+	gcEvents []time.Time
 }
 
 func snapshotSpans(live map[uint64]*span) map[uint64]*span {
@@ -334,6 +335,13 @@ type frameJSON struct {
 	// can't drift out of sync the way slotCap/SERVER_SLOT_CAP used to.
 	SlotCap           int     `json:"slotCap"`
 	FadeWindowSeconds float64 `json:"fadeWindowSeconds"`
+
+	// GCEvents is how many seconds ago each recent GC cycle started
+	// (oldest first), bounded to GCHistorySeconds -- the frontend plots
+	// these as a timeline strip under the minimap. Unlike the minimap
+	// itself, this axis is time, not address space.
+	GCEvents         []float64 `json:"gcEvents"`
+	GCHistorySeconds float64   `json:"gcHistorySeconds"`
 }
 
 // buildFrame renders a stable, contiguous window of page ids. Once the
@@ -370,14 +378,17 @@ func (g *gcState) buildFrame(now time.Time, view *viewMode) frameJSON {
 
 	switch {
 	case wantFreeze && view.frozen == nil:
-		view.frozen = &frozenSnapshot{at: now, spans: snapshotSpans(g.spans), metrics: g.metricsSnapshot()}
+		view.frozen = &frozenSnapshot{
+			at: now, spans: snapshotSpans(g.spans), metrics: g.metricsSnapshot(),
+			gcEvents: append([]time.Time(nil), g.gcEvents...),
+		}
 	case !wantFreeze && view.frozen != nil:
 		view.frozen = nil
 	}
 
-	spans, metrics, frameTime := g.spans, g.metricsSnapshot(), now
+	spans, metrics, frameTime, gcEvents := g.spans, g.metricsSnapshot(), now, g.gcEvents
 	if view.frozen != nil {
-		spans, metrics, frameTime = view.frozen.spans, view.frozen.metrics, view.frozen.at
+		spans, metrics, frameTime, gcEvents = view.frozen.spans, view.frozen.metrics, view.frozen.at, view.frozen.gcEvents
 	}
 
 	rows := buildRows(view.windowStart, spans, frameTime)
@@ -404,6 +415,11 @@ func (g *gcState) buildFrame(now time.Time, view *viewMode) frameJSON {
 	}
 	sort.Slice(summary, func(i, j int) bool { return summary[i].ID < summary[j].ID })
 
+	gcAges := make([]float64, len(gcEvents))
+	for i, t := range gcEvents {
+		gcAges[i] = frameTime.Sub(t).Seconds()
+	}
+
 	return frameJSON{
 		Type:              "frame",
 		WindowStart:       view.windowStart,
@@ -413,5 +429,7 @@ func (g *gcState) buildFrame(now time.Time, view *viewMode) frameJSON {
 		SlotCap:           slotCap,
 		FadeWindowSeconds: fadeWindow.Seconds(),
 		Metrics:           metrics,
+		GCEvents:          gcAges,
+		GCHistorySeconds:  gcHistoryWindow.Seconds(),
 	}
 }

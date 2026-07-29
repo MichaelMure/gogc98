@@ -83,10 +83,23 @@ func consumeSnapshot(state *gcState, r io.Reader) {
 			maxTime = ev.Time()
 		}
 		n++
-		if ev.Kind() != trace.EventExperimental {
-			continue
+		switch ev.Kind() {
+		case trace.EventExperimental:
+			state.applyEvent(now, ev.Experimental())
+		case trace.EventRangeBegin:
+			// GC cycles aren't part of the traceallocfree experimental
+			// batch (that's alloc/free/span events only) -- they're a
+			// generic named range on the standard trace, scoped to the
+			// whole program rather than one goroutine/proc. Only Begin
+			// is handled: a cycle spanning a poll boundary would also
+			// show up as EventRangeActive in the next snapshot, but at
+			// its original (already-seen, already-recorded) start time,
+			// so it's filtered out by the ev.Time() <= since check above
+			// before reaching here.
+			if r := ev.Range(); r.Name == "GC concurrent mark phase" {
+				state.recordGCStart(now)
+			}
 		}
-		state.applyEvent(now, ev.Experimental())
 	}
 	state.lastEventTime = maxTime
 

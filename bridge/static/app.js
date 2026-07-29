@@ -26,6 +26,9 @@ const minimapEl = document.getElementById('minimap');
 const minimapCanvasEl = document.getElementById('minimapCanvas');
 const minimapCtx = minimapCanvasEl.getContext('2d');
 const minimapViewportEl = document.getElementById('minimapViewport');
+const gcTimelineEl = document.getElementById('gcTimeline');
+const gcTimelineCanvasEl = document.getElementById('gcTimelineCanvas');
+const gcTimelineCtx = gcTimelineCanvasEl.getContext('2d');
 const statusEl = document.getElementById('status');
 const freezeBtn = document.getElementById('freezeBtn');
 const learnBtn = document.getElementById('learnBtn');
@@ -39,6 +42,8 @@ learnOverlay.onclick = (e) => {
 };
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') learnOverlay.hidden = true;
+  if (e.key === '?') learnOverlay.hidden = !learnOverlay.hidden;
+  if (e.key === 'f' || e.key === 'F') toggleFreeze();
 });
 
 let ws;
@@ -65,11 +70,12 @@ function send(msg) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
-freezeBtn.onclick = () => {
+function toggleFreeze() {
   state.frozen = !state.frozen;
-  freezeBtn.textContent = state.frozen ? 'Unfreeze' : 'Freeze';
+  freezeBtn.innerHTML = state.frozen ? 'Un<u>f</u>reeze' : '<u>F</u>reeze';
   send({ anchor: state.anchor, freeze: state.frozen });
-};
+}
+freezeBtn.onclick = toggleFreeze;
 
 // Mouse-wheel panning over the view. preventDefault + non-passive so
 // this replaces the browser's native scroll instead of fighting it.
@@ -427,6 +433,27 @@ function render(frame) {
   const vpLeft = Math.min(stripWidth - vpWidth, Math.max(0, idToX(frame.windowStart)));
   minimapViewportEl.style.left = `${vpLeft}px`;
   minimapViewportEl.style.width = `${vpWidth}px`;
+
+  // GC cycle timeline: a separate strip under the minimap, but on a
+  // different axis -- time, not address space, right edge is "now".
+  // Ages arrive pre-computed from the server (frame.gcEvents, seconds
+  // since each recent cycle started) rather than timestamps, the same
+  // reasoning as every other age/recency field here: only relative
+  // recency against the render cadence matters, and it avoids needing
+  // clock sync between server and browser.
+  const gcWidth = Math.max(1, Math.round(gcTimelineEl.clientWidth));
+  const gcHeight = Math.max(1, Math.round(gcTimelineEl.clientHeight));
+  gcTimelineCanvasEl.width = gcWidth;
+  gcTimelineCanvasEl.height = gcHeight;
+  gcTimelineCtx.fillStyle = '#000';
+  gcTimelineCtx.fillRect(0, 0, gcWidth, gcHeight);
+  const gcHistorySeconds = frame.gcHistorySeconds || 20;
+  gcTimelineCtx.fillStyle = '#ff0';
+  for (const age of frame.gcEvents || []) {
+    if (age < 0 || age > gcHistorySeconds) continue;
+    const x = Math.min(gcWidth - 1, Math.round((1 - age / gcHistorySeconds) * (gcWidth - 1)));
+    gcTimelineCtx.fillRect(x, 0, 1, gcHeight);
+  }
 
   const m = frame.metrics;
   statusEl.textContent =

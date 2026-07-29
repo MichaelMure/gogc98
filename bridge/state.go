@@ -43,6 +43,11 @@ const (
 // fading out) before being pruned entirely.
 const fadeWindow = 1500 * time.Millisecond
 
+// gcHistoryWindow is how far back the GC-cycle timeline (see
+// gcState.gcEvents) remembers a cycle start, and therefore how wide a
+// time span the frontend's GC timeline strip covers.
+const gcHistoryWindow = 20 * time.Second
+
 // activityHalfLife controls how fast a span's activity score decays,
 // which drives the minimap's per-span brightness (see app.js).
 const activityHalfLife = 1.5 // seconds
@@ -136,6 +141,13 @@ type gcState struct {
 
 	allocRate rateCounter
 	freeRate  rateCounter
+
+	// gcEvents holds the start time of each recent GC cycle (oldest
+	// first), trimmed to gcHistoryWindow lazily in prune. Populated from
+	// the trace's own GC range-begin events (see main.go), not the
+	// traceallocfree experimental batch -- GC cycles aren't part of
+	// that stream.
+	gcEvents []time.Time
 
 	lastEventTime trace.Time
 }
@@ -287,6 +299,14 @@ func (g *gcState) applyEvent(now time.Time, exp trace.ExperimentalEvent) {
 	}
 }
 
+// recordGCStart appends one GC-cycle-start mark to the timeline. now is
+// the poll-time clock reading (see applyEvent), for the same reason:
+// only relative recency against the frontend's render cadence matters,
+// not the trace's own clock.
+func (g *gcState) recordGCStart(now time.Time) {
+	g.gcEvents = append(g.gcEvents, now)
+}
+
 // prune drops objects that finished fading. Spans are deliberately
 // *not* evicted on inactivity here -- a span holding long-lived
 // survivors can go quiet for a long time without being freed, and
@@ -300,5 +320,14 @@ func (g *gcState) prune(now time.Time) {
 				delete(sp.objects, idx)
 			}
 		}
+	}
+
+	cutoff := now.Add(-gcHistoryWindow)
+	trim := 0
+	for trim < len(g.gcEvents) && g.gcEvents[trim].Before(cutoff) {
+		trim++
+	}
+	if trim > 0 {
+		g.gcEvents = g.gcEvents[trim:]
 	}
 }

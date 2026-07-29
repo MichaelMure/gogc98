@@ -7,9 +7,9 @@
 </head>
 <body>
 <div class="win">
-  <div class="titlebar">Defragmenting heap — GOEXPERIMENT=greenteagc</div>
+  <div class="titlebar">Golang heap – Allocation and GC</div>
   <div class="toolbar">
-    <button id="autoBtn">Auto-follow: ON</button>
+    <button id="freezeBtn">Freeze</button>
     <span class="legend">
       <span class="swatch" style="background:hsl(210,65%,55%)"></span>type
       <span class="swatch" style="background:hsl(35,55%,45%)"></span>untyped
@@ -20,16 +20,20 @@
   </div>
   <div class="label-legend">
     Each row is one 8&nbsp;KB heap page, Go's unit of memory management. The
-    Go allocator only ever puts same-sized objects in a page (never a mix),
-    which is why every box in a row is the same size, and why one page's
-    size tells you what kind of page it is.
+    Go allocator only ever puts same-size-class objects in a page (never a
+    mix). Box width is proportional to an object's byte size relative to one
+    page, so a page of many tiny objects looks like a dense strip of
+    slivers, and a single object bigger than one page fills every page it
+    spans edge to edge.
     <br>
     row label id: <span style="color:#4a4">green</span> = real page &nbsp;
     <span style="color:#556">dim</span> = reclaimed/unused
     <br>
-    annotation: <span style="color:#4a4">128B</span> = size of each box on this page (not the page itself) &nbsp;
-    <span style="color:#e80">+N</span> = N more boxes exist here but don't fit in the row &nbsp;
-    <span style="color:#88a">i/n</span> = page i of n of one large object
+    annotation: <span style="color:hsl(200,70%,55%)">128B</span> = the size class of objects on this page,
+    colored <span style="color:hsl(200,70%,55%)">blue</span>&ndash;<span style="color:hsl(0,70%,55%)">red</span>
+    by scale (log, 8&nbsp;B&ndash;32&nbsp;KB) &nbsp;
+    <span style="color:#e80">+N</span> = N more objects here aren't individually tracked &nbsp;
+    <span style="color:#88a">i/n</span> = page i of n of one object spanning multiple pages
   </div>
   <div class="label-legend">
     minimap (one tick per tracked page across the whole heap, not just

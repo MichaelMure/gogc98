@@ -17,38 +17,40 @@ const windowCount = 120
 // available row width.
 const slotCap = 256
 
-// viewState is one connection's view into the heap's id space. auto
-// and anchor are set by client control messages (mutex-guarded,
-// written from a separate goroutine); windowStart/haveWindow are
-// hysteresis state owned exclusively by the frame-building goroutine,
-// so a page's screen position stays stable across frames instead of
-// reshuffling every tick -- only actually panning (auto drifting, or
-// a manual scroll) should move anything.
+// viewMode is one connection's view into the heap's id space. anchor
+// is set by client control messages (mutex-guarded, written from a
+// separate goroutine) once the client has scrolled at least once;
+// windowStart/haveWindow are owned exclusively by the frame-building
+// goroutine. Before the client has ever scrolled, the server jumps
+// windowStart once to whatever page id is currently first-populated
+// (so a fresh connection doesn't start staring at empty low page ids)
+// and then leaves it alone -- there's no periodic re-centering here,
+// the user is in full control of scrolling after that first jump.
 type viewMode struct {
-	mu     sync.Mutex
-	auto   bool
-	anchor uint64
+	mu        sync.Mutex
+	anchor    uint64
+	anchorSet bool
 
 	windowStart uint64
 	haveWindow  bool
-
-	// outsideStreak counts consecutive frames where the hottest page
-	// has been outside the window, so a single-tick activity spike on
-	// some far-off page can't yank the view for one frame and then
-	// bounce back -- only sustained drift actually pans it.
-	outsideStreak int
 }
-
-// recenterDebounce is how many consecutive frames the hottest page
-// must stay outside the window before auto-follow actually pans,
-// filtering out single-frame activity noise.
-const recenterDebounce = 4
 
 type objectJSON struct {
 	Idx    uint32  `json:"idx"`
 	TypeID uint64  `json:"typeId"`
-	Status string  `json:"status"`
+	Status string  `json:"status"` // "alive", "freed", or "" for a slot never individually observed
 	Age    float64 `json:"age"`
+
+	// XFrac/WidthFrac locate this fragment within its page, as a
+	// fraction of one page's byte size (0..1). An object no bigger
+	// than one page contributes a single fragment sized to its own
+	// elemSize/pageSize share of the row; an object spanning several
+	// pages contributes one fragment per page it touches, each
+	// covering only the portion of the object that actually falls in
+	// that page -- so a box's width reflects real byte size instead
+	// of a fixed grid cell.
+	XFrac     float64 `json:"xFrac"`
+	WidthFrac float64 `json:"widthFrac"`
 }
 
 type pageJSON struct {
@@ -59,32 +61,50 @@ type pageJSON struct {
 	Objects   []objectJSON `json:"objects"`
 
 	// PageOffset/PageCount describe this row's place within its span
-	// (npages can be >1, most commonly for large objects that get a
-	// dedicated multi-page span). PageOffset 0 is the span's base row,
-	// which carries the real per-object grid; PageOffset > 0 rows are
-	// physically part of the same allocation and must not be rendered
-	// as empty, but don't get their own Objects list -- RepType is a
-	// representative type id from the span for coloring them.
+	// (npages can be >1, most commonly for objects bigger than one
+	// page). Every row gets its own Objects list, not just the base
+	// one -- see fragmentsByPage.
 	PageOffset uint64 `json:"pageOffset"`
 	PageCount  uint64 `json:"pageCount"`
-	RepType    uint64 `json:"repType"`
 }
 
-// representativeType returns a type id for coloring a span's
-// continuation rows, since those rows don't carry their own object
-// list. Deterministically picks the object at the lowest index rather
-// than ranging over the map (whose iteration order Go randomizes per
-// call), so a continuation row's color doesn't flicker every frame.
-func representativeType(sp *span) uint64 {
-	found := false
-	var minIdx uint32
-	var typeID uint64
-	for idx, obj := range sp.objects {
-		if !found || idx < minIdx {
-			minIdx, typeID, found = idx, obj.typeID, true
+// fragmentsByPage splits every tracked (or never-individually
+// -observed) object in a span into per-physical-page fragments, keyed
+// by page offset within the span. A page-boundary-straddling object
+// (common once a span has more than one page, since Go doesn't align
+// size-class slots to physical pages) contributes a fragment to each
+// side of the boundary, sized to only the portion that actually falls
+// on that page.
+func fragmentsByPage(sp *span, now time.Time) map[uint64][]objectJSON {
+	if sp.elemSize == 0 {
+		return nil
+	}
+	shown := sp.nelems
+	if shown > slotCap {
+		shown = slotCap
+	}
+	frags := make(map[uint64][]objectJSON)
+	add := func(idx uint32, typeID uint64, status string, age float64) {
+		start := uint64(idx) * uint64(sp.elemSize)
+		end := start + uint64(sp.elemSize)
+		for p := start / pageSize; p <= (end-1)/pageSize; p++ {
+			pageStart, pageEnd := p*pageSize, (p+1)*pageSize
+			ovStart, ovEnd := max(start, pageStart), min(end, pageEnd)
+			frags[p] = append(frags[p], objectJSON{
+				Idx: idx, TypeID: typeID, Status: status, Age: age,
+				XFrac:     float64(ovStart-pageStart) / pageSize,
+				WidthFrac: float64(ovEnd-ovStart) / pageSize,
+			})
 		}
 	}
-	return typeID
+	for idx := uint32(0); idx < shown; idx++ {
+		if obj, ok := sp.objects[idx]; ok {
+			add(idx, obj.typeID, string(obj.status), now.Sub(obj.changed).Seconds())
+		} else {
+			add(idx, 0, "", 0)
+		}
+	}
+	return frags
 }
 
 type summaryJSON struct {
@@ -108,7 +128,6 @@ type frameJSON struct {
 	Pages       []pageJSON    `json:"pages"`
 	Summary     []summaryJSON `json:"summary"`
 	Metrics     metricsJSON   `json:"metrics"`
-	Auto        bool          `json:"auto"`
 
 	// SlotCap and FadeWindowSeconds mirror the same-named server-side
 	// constants (slotCap, fadeWindow in state.go). Sent once per frame
@@ -118,12 +137,12 @@ type frameJSON struct {
 	FadeWindowSeconds float64 `json:"fadeWindowSeconds"`
 }
 
-// buildFrame renders a stable, contiguous window of page ids: in
-// manual mode the window starts at the client's chosen anchor; in
-// auto mode it only pans when the currently hottest page has drifted
-// outside the window, rather than re-picking "top N by activity"
-// fresh every tick, which would reshuffle the whole ribbon on every
-// frame.
+// buildFrame renders a stable, contiguous window of page ids. Once the
+// client has scrolled, the window always starts at their chosen
+// anchor. Until then, it jumps exactly once to center on the first
+// currently-tracked page id, and otherwise doesn't move on its own --
+// no periodic re-centering, so the user's scroll position is never
+// yanked out from under them.
 func (g *gcState) buildFrame(now time.Time, view *viewMode) frameJSON {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -131,35 +150,19 @@ func (g *gcState) buildFrame(now time.Time, view *viewMode) frameJSON {
 	g.prune(now)
 
 	view.mu.Lock()
-	auto, anchor := view.auto, view.anchor
+	anchorSet, anchor := view.anchorSet, view.anchor
 	view.mu.Unlock()
 
-	if !auto {
+	if anchorSet {
 		view.windowStart = anchor
-		view.haveWindow = true
-	} else {
-		var hottest uint64
-		hottestScore := -1.0
-		for id, sp := range g.spans {
-			if sp.activity > hottestScore {
-				hottestScore = sp.activity
-				hottest = id
-			}
-		}
-		outside := !view.haveWindow || hottest < view.windowStart || hottest >= view.windowStart+windowCount
-		if outside {
-			view.outsideStreak++
-		} else {
-			view.outsideStreak = 0
-		}
-		if !view.haveWindow || view.outsideStreak >= recenterDebounce {
-			if hottest > windowCount/2 {
-				view.windowStart = hottest - windowCount/2
+	} else if !view.haveWindow {
+		if first, ok := g.firstSpanID(); ok {
+			if first > windowCount/2 {
+				view.windowStart = first - windowCount/2
 			} else {
 				view.windowStart = 0
 			}
 			view.haveWindow = true
-			view.outsideStreak = 0
 		}
 	}
 
@@ -172,25 +175,19 @@ func (g *gcState) buildFrame(now time.Time, view *viewMode) frameJSON {
 		}
 		spanEnd := sp.id + npages
 		lo, hi := max(sp.id, view.windowStart), min(spanEnd, windowEnd)
+		if lo >= hi {
+			continue
+		}
+
+		fragsByPage := fragmentsByPage(sp, now)
 		for id := lo; id < hi; id++ {
-			pj := pageJSON{
+			pageOffset := id - sp.id
+			pages = append(pages, pageJSON{
 				ID: id, SizeClass: sp.sizeClass, ElemSize: sp.elemSize,
 				Nelems:     sp.nelems,
-				PageOffset: id - sp.id, PageCount: npages,
-				RepType: representativeType(sp),
-			}
-			if id == sp.id {
-				for _, obj := range sp.objects {
-					if obj.idx >= slotCap {
-						continue
-					}
-					pj.Objects = append(pj.Objects, objectJSON{
-						Idx: obj.idx, TypeID: obj.typeID, Status: string(obj.status),
-						Age: now.Sub(obj.changed).Seconds(),
-					})
-				}
-			}
-			pages = append(pages, pj)
+				PageOffset: pageOffset, PageCount: npages,
+				Objects: fragsByPage[pageOffset],
+			})
 		}
 	}
 
@@ -206,7 +203,6 @@ func (g *gcState) buildFrame(now time.Time, view *viewMode) frameJSON {
 		WindowCount:       windowCount,
 		Pages:             pages,
 		Summary:           summary,
-		Auto:              auto,
 		SlotCap:           slotCap,
 		FadeWindowSeconds: fadeWindow.Seconds(),
 		Metrics: metricsJSON{

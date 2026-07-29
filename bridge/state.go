@@ -37,7 +37,7 @@ const (
 const fadeWindow = 1500 * time.Millisecond
 
 // activityHalfLife controls how fast a span's activity score decays,
-// which drives which spans auto-follow considers "interesting".
+// which drives the minimap's per-span brightness (see app.js).
 const activityHalfLife = 1.5 // seconds
 
 type object struct {
@@ -138,6 +138,19 @@ func newGCState() *gcState {
 		spans:     make(map[uint64]*span),
 		pageOwner: make(map[uint64]uint64),
 	}
+}
+
+// firstSpanID returns the lowest page id currently tracked, if any --
+// used for the one-time initial view placement in buildFrame.
+func (g *gcState) firstSpanID() (uint64, bool) {
+	first := uint64(0)
+	found := false
+	for id := range g.spans {
+		if !found || id < first {
+			first, found = id, true
+		}
+	}
+	return first, found
 }
 
 func (g *gcState) spanFor(id uint64) *span {

@@ -102,12 +102,11 @@ func consumeSnapshot(state *gcState, r io.Reader) {
 }
 
 type controlMsg struct {
-	Mode   string `json:"mode"`
 	Anchor uint64 `json:"anchor"`
 }
 
 func serveWS(ws *websocket.Conn, state *gcState) {
-	view := &viewMode{auto: true}
+	view := &viewMode{}
 
 	go func() {
 		for {
@@ -116,10 +115,8 @@ func serveWS(ws *websocket.Conn, state *gcState) {
 				return
 			}
 			view.mu.Lock()
-			view.auto = msg.Mode != "manual"
-			if !view.auto {
-				view.anchor = msg.Anchor
-			}
+			view.anchorSet = true
+			view.anchor = msg.Anchor
 			view.mu.Unlock()
 		}
 	}()

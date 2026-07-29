@@ -1,4 +1,10 @@
-const state = { auto: true, anchor: 0 };
+// state.anchor tracks wherever the view currently is (server-chosen
+// until the user scrolls, then whatever they scrolled to).
+// state.userScrolled becomes true on the first scroll -- from then on
+// the server never moves the view on its own, and a reconnect resends
+// the anchor instead of letting the server redo its one-time initial
+// jump over the user's scroll position.
+const state = { anchor: 0, userScrolled: false, frozen: false };
 
 // See the minimap brightness smoothing in render() for why this
 // exists instead of just taking each frame's max directly.
@@ -7,22 +13,21 @@ const MINIMAP_MAX_DECAY = Math.pow(0.5, 0.15 / 15); // half-life ~15s at the 150
 
 const minimapEl = document.getElementById('minimap');
 const statusEl = document.getElementById('status');
-const autoBtn = document.getElementById('autoBtn');
+const freezeBtn = document.getElementById('freezeBtn');
 
 let ws;
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.onopen = () => {
     console.log('gogc98: connected');
-    // Every new connection starts a fresh server-side view defaulting
-    // to auto-follow -- without this, any reconnect (a transient
-    // network blip, the tab being backgrounded, anything) would
-    // silently revert a manually-scrolled view back to auto-follow,
-    // which repositions the window based on activity instead of
-    // holding it where the user left it.
-    send(state.auto ? { mode: 'auto' } : { mode: 'manual', anchor: state.anchor });
+    // Only resend an anchor if the user actually took control already
+    // -- otherwise let the fresh server-side view do its own one-time
+    // jump to the first populated page, same as any new connection.
+    if (state.userScrolled) send({ anchor: state.anchor });
   };
-  ws.onmessage = (ev) => render(JSON.parse(ev.data));
+  ws.onmessage = (ev) => {
+    if (!state.frozen) render(JSON.parse(ev.data));
+  };
   ws.onclose = () => {
     console.log('gogc98: disconnected, reconnecting in 1s');
     statusEl.textContent = 'disconnected — retrying...';
@@ -36,23 +41,24 @@ function send(msg) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
-autoBtn.onclick = () => {
-  state.auto = !state.auto;
-  autoBtn.textContent = 'Auto-follow: ' + (state.auto ? 'ON' : 'OFF');
-  send(state.auto ? { mode: 'auto' } : { mode: 'manual', anchor: state.anchor });
+freezeBtn.onclick = () => {
+  state.frozen = !state.frozen;
+  freezeBtn.textContent = state.frozen ? 'Unfreeze' : 'Freeze';
 };
 
 // Mouse-wheel panning over the view. preventDefault + non-passive so
 // this replaces the browser's native scroll instead of fighting it.
+// Ignored while frozen, so unfreezing always resumes exactly where it
+// left off instead of jumping to wherever a blind scroll landed.
 document.getElementById('pagesContainer').addEventListener(
   'wheel',
   (e) => {
     e.preventDefault();
-    state.auto = false;
-    autoBtn.textContent = 'Auto-follow: OFF';
+    if (state.frozen) return;
+    state.userScrolled = true;
     const step = Math.sign(e.deltaY) * Math.max(1, Math.round(Math.abs(e.deltaY) / 20));
     state.anchor = Math.max(0, state.anchor + step);
-    send({ mode: 'manual', anchor: state.anchor });
+    send({ anchor: state.anchor });
   },
   { passive: false }
 );
@@ -73,6 +79,17 @@ function typeColor(typeId) {
   return `hsl(${hue}, 65%, 55%)`;
 }
 
+// Small size classes read blue, large ones read red (log2 scale, 8B
+// to 32KB -- Go's actual size-class range), so the size annotation's
+// color alone hints at scale even before reading the number.
+function sizeColor(elemSize) {
+  if (!elemSize) return LABEL_DIM;
+  const lo = 3; // log2(8)
+  const hi = 15; // log2(32768), Go's largest size class
+  const t = Math.min(1, Math.max(0, (Math.log2(elemSize) - lo) / (hi - lo)));
+  return `hsl(${200 - t * 200}, 70%, 55%)`;
+}
+
 function borderColor(obj) {
   if (obj.status === 'freed') {
     const alpha = Math.max(0, 1 - obj.age / fadeWindowSeconds);
@@ -84,7 +101,9 @@ function borderColor(obj) {
   return 'rgba(255,255,255,0.15)';
 }
 
-// Fixed pixel size per object cell -- the "always same scale" part.
+// Fixed pixel height per row. Box *width* is proportional to byte
+// size instead (see render()) -- fixed-width cells made every object
+// look the same size regardless of whether it was 8 bytes or 16KB.
 const CELL = 8;
 
 // serverSlotCap and fadeWindowSeconds are read from each frame
@@ -103,8 +122,8 @@ let fadeWindowSeconds = 1.5;
 // Width reserved on the left of each row for its page-id label, a
 // stand-in "address" (we only ever have the relative page index, see
 // project notes on why we don't reconstruct real addresses). Wide
-// enough for "id +1024" or "id 32768B", the longest label text used.
-const LABEL_WIDTH = 84;
+// enough for an id plus two annotation segments, e.g. "id 32768B +1024".
+const LABEL_WIDTH = 108;
 
 const pagesContainer = document.getElementById('pagesContainer');
 const heapCanvas = document.getElementById('heapCanvas');
@@ -121,19 +140,24 @@ const LABEL_CONTINUATION = '#88a';
 
 // Draws "id" left-aligned so ids form a stable, scannable column
 // (their position no longer depends on the length of any annotation
-// text next to them), and an optional secondary annotation (size,
-// truncation count, continuation marker) right-aligned against the
-// box grid boundary, in a de-emphasized color, so it reads as detail
-// attached to the boxes rather than part of the id itself.
-function drawLabel(id, annotation, idColor, annotationColor, y) {
+// text next to them), and zero or more annotation segments (size,
+// truncation count, continuation marker) packed right-to-left against
+// the box grid boundary, each in its own de-emphasized color, so they
+// read as detail attached to the boxes rather than part of the id
+// itself. Segments closest to the boxes are listed last.
+function drawLabel(id, idColor, y, ...segments) {
   heapCtx.textAlign = 'left';
   heapCtx.fillStyle = idColor;
   heapCtx.fillText(String(id), 4, y + CELL / 2);
 
-  if (annotation) {
-    heapCtx.textAlign = 'right';
-    heapCtx.fillStyle = annotationColor;
-    heapCtx.fillText(annotation, LABEL_WIDTH - 6, y + CELL / 2);
+  heapCtx.textAlign = 'right';
+  let x = LABEL_WIDTH - 6;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const seg = segments[i];
+    if (!seg || !seg.text) continue;
+    heapCtx.fillStyle = seg.color;
+    heapCtx.fillText(seg.text, x, y + CELL / 2);
+    x -= heapCtx.measureText(seg.text).width + 6;
   }
 }
 
@@ -143,16 +167,18 @@ function drawLabel(id, annotation, idColor, annotationColor, y) {
 // which other pages happen to be tracked, so it stays stable frame to
 // frame.
 function render(frame) {
-  // Keep the local anchor synced to wherever auto-follow currently is,
-  // so switching to manual (button or wheel) continues from the
-  // current view instead of jumping to a stale anchor.
-  if (state.auto) state.anchor = frame.windowStart;
+  // Until the user scrolls, keep the local anchor synced to wherever
+  // the server has placed the view (its one-time initial jump), so
+  // the first actual scroll continues from the current view instead
+  // of jumping from a stale anchor.
+  if (!state.userScrolled) state.anchor = frame.windowStart;
   serverSlotCap = frame.slotCap || serverSlotCap;
   fadeWindowSeconds = frame.fadeWindowSeconds || fadeWindowSeconds;
 
   const cellsPerRow = Math.max(1, Math.floor((pagesContainer.clientWidth - LABEL_WIDTH) / CELL));
+  const rowWidth = cellsPerRow * CELL;
 
-  heapCanvas.width = LABEL_WIDTH + cellsPerRow * CELL;
+  heapCanvas.width = LABEL_WIDTH + rowWidth;
   heapCanvas.height = frame.windowCount * CELL;
 
   heapCtx.fillStyle = '#000';
@@ -170,65 +196,59 @@ function render(frame) {
     if (!page) {
       // Reclaimed/never-allocated: dim, not green -- a void row must
       // not look like it holds a real page, only its id is known.
-      drawLabel(id, '', LABEL_DIM, LABEL_DIM, y);
+      drawLabel(id, LABEL_DIM, y);
       heapCtx.fillStyle = '#0a0a0a';
-      heapCtx.fillRect(LABEL_WIDTH, y, cellsPerRow * CELL, CELL);
-      continue;
-    }
-
-    if (page.pageOffset > 0) {
-      // Continuation of a multi-page span (typically a large object
-      // with its own dedicated span) -- physically part of the same
-      // allocation as the base row above, not empty space. There's no
-      // per-object grid to draw here (the object's own index grid
-      // only makes sense on the base row), so just fill the row to
-      // show it's occupied, at reduced opacity to read as "continues"
-      // rather than a fresh object.
-      drawLabel(id, `${page.pageOffset + 1}/${page.pageCount}`, LABEL_ACTIVE, LABEL_CONTINUATION, y);
-      heapCtx.globalAlpha = 0.45;
-      heapCtx.fillStyle = typeColor(page.repType);
-      heapCtx.fillRect(LABEL_WIDTH, y + 1, cellsPerRow * CELL, CELL - 2);
-      heapCtx.globalAlpha = 1;
+      heapCtx.fillRect(LABEL_WIDTH, y, rowWidth, CELL);
       continue;
     }
 
     const nelems = page.nelems || 0;
-    const shown = Math.min(nelems, cellsPerRow, serverSlotCap);
+    const shown = Math.min(nelems, serverSlotCap);
     const truncated = nelems > shown;
+    const sizeSeg = { text: `${page.elemSize}B`, color: sizeColor(page.elemSize) };
 
-    // Flag truncation as a warning annotation rather than silently
-    // clipping -- a row that looks "not full" could otherwise be
-    // hiding hundreds of objects (small size classes go up to 1024
-    // per page, easily more than fit in one row). Otherwise, show the
-    // object size, de-emphasized -- a compact stand-in for "what kind
-    // of page this is", since a page only ever holds one Go size
-    // class, without competing visually with the id itself.
+    // The size is always shown, so a row's kind of page is legible
+    // regardless of whatever else is going on. Truncation is flagged
+    // alongside it rather than replacing it -- a page could otherwise
+    // be hiding hundreds of untracked objects (small size classes go
+    // up to 1024 per page), and losing the size while flagging that
+    // would be a step backwards. A continuation row additionally shows
+    // its place in the span.
     if (truncated) {
-      drawLabel(id, `+${nelems - shown}`, LABEL_ACTIVE, LABEL_WARN, y);
+      drawLabel(id, LABEL_ACTIVE, y, sizeSeg, { text: `+${nelems - shown}`, color: LABEL_WARN });
+    } else if (page.pageOffset > 0) {
+      drawLabel(id, LABEL_ACTIVE, y, sizeSeg, { text: `${page.pageOffset + 1}/${page.pageCount}`, color: LABEL_CONTINUATION });
     } else {
-      drawLabel(id, `${page.elemSize}B`, LABEL_ACTIVE, LABEL_DIM, y);
+      drawLabel(id, LABEL_ACTIVE, y, sizeSeg);
     }
 
-    const byIdx = new Map((page.objects || []).map((o) => [o.idx, o]));
-    for (let i = 0; i < shown; i++) {
-      const cx = LABEL_WIDTH + i * CELL;
-      const obj = byIdx.get(i);
-      if (!obj || obj.status === 'freed') {
-        // Freed slots read as holes immediately (empty fill), not as
-        // still-occupied cells -- only the fading red outline marks
-        // "recently freed" vs. "never allocated".
+    // Every row -- base or continuation -- draws its own fragments,
+    // each already sized (xFrac/widthFrac) to its true share of this
+    // page's bytes by the server. An object no bigger than one page
+    // gets one fragment sized to elemSize/pageSize; an object bigger
+    // than one page gets a fragment per page it touches, so it reads
+    // as one solid box spanning every row it occupies, at the same
+    // full opacity and color as any other box -- no separate
+    // "continuation" fill style needed.
+    for (const frag of page.objects || []) {
+      const bx = LABEL_WIDTH + frag.xFrac * rowWidth;
+      const bw = Math.max(1, frag.widthFrac * rowWidth);
+      if (!frag.status || frag.status === 'freed') {
+        // Freed/never-observed slots read as holes immediately (empty
+        // fill), not as still-occupied boxes -- only the fading red
+        // outline marks "recently freed" vs. "never observed".
         heapCtx.fillStyle = '#181818';
-        heapCtx.fillRect(cx + 0.5, y + 0.5, CELL - 1, CELL - 1);
-        if (obj) {
-          heapCtx.strokeStyle = borderColor(obj);
-          heapCtx.strokeRect(cx + 0.5, y + 0.5, CELL - 1, CELL - 1);
+        heapCtx.fillRect(bx + 0.5, y + 0.5, bw - 1, CELL - 1);
+        if (frag.status === 'freed') {
+          heapCtx.strokeStyle = borderColor(frag);
+          heapCtx.strokeRect(bx + 0.5, y + 0.5, bw - 1, CELL - 1);
         }
         continue;
       }
-      heapCtx.fillStyle = typeColor(obj.typeId);
-      heapCtx.fillRect(cx + 1, y + 1, CELL - 2, CELL - 2);
-      heapCtx.strokeStyle = borderColor(obj);
-      heapCtx.strokeRect(cx + 0.5, y + 0.5, CELL - 1, CELL - 1);
+      heapCtx.fillStyle = typeColor(frag.typeId);
+      heapCtx.fillRect(bx + 1, y + 1, bw - 2, CELL - 2);
+      heapCtx.strokeStyle = borderColor(frag);
+      heapCtx.strokeRect(bx + 0.5, y + 0.5, bw - 1, CELL - 1);
     }
   }
 
@@ -259,5 +279,5 @@ function render(frame) {
     `allocs/s: ${m.allocsPerSec.toFixed(0)}  |  ` +
     `frees/s: ${m.freesPerSec.toFixed(0)}  |  ` +
     `spans: ${m.trackedSpans}  |  ` +
-    `mode: ${frame.auto ? 'auto-follow' : 'manual'}`;
+    `${state.frozen ? 'frozen' : 'live'}`;
 }

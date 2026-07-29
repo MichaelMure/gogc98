@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gogc98 — heap defragmenter</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="win">
+  <div class="titlebar">Defragmenting heap — GOEXPERIMENT=greenteagc</div>
+  <div class="toolbar">
+    <button id="autoBtn">Auto-follow: ON</button>
+    <span class="legend">
+      <span class="swatch" style="background:hsl(210,65%,55%)"></span>type
+      <span class="swatch" style="background:hsl(35,55%,45%)"></span>untyped
+      <span class="swatch" style="background:#181818;border:1px solid #333"></span>empty slot
+      <span class="swatch" style="border:2px solid rgba(80,255,120,1)"></span>alloc
+      <span class="swatch" style="border:2px solid rgba(255,60,60,1)"></span>freed
+    </span>
+  </div>
+  <div class="label-legend">
+    Each row is one 8&nbsp;KB heap page, Go's unit of memory management. The
+    Go allocator only ever puts same-sized objects in a page (never a mix),
+    which is why every box in a row is the same size, and why one page's
+    size tells you what kind of page it is.
+    <br>
+    row label id: <span style="color:#4a4">green</span> = real page &nbsp;
+    <span style="color:#556">dim</span> = reclaimed/unused
+    <br>
+    annotation: <span style="color:#4a4">128B</span> = size of each box on this page (not the page itself) &nbsp;
+    <span style="color:#e80">+N</span> = N more boxes exist here but don't fit in the row &nbsp;
+    <span style="color:#88a">i/n</span> = page i of n of one large object
+  </div>
+  <div class="label-legend">
+    minimap (one tick per tracked page across the whole heap, not just
+    what's currently in view): <span style="color:#cc0">yellow</span> =
+    in the current view &nbsp; <span style="color:#0a0">green</span>
+    (brighter = more recently active) = tracked but elsewhere
+  </div>
+  <div id="minimap" class="minimap"></div>
+  <div id="pagesContainer" class="pages-container">
+    <canvas id="heapCanvas"></canvas>
+  </div>
+  <div class="statusbar" id="status">connecting&hellip;</div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

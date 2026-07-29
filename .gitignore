@@ -1,0 +1,5 @@
+.claude
+.idea
+*.log
+*.pid
+/bin

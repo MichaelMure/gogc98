@@ -1,0 +1,108 @@
+body {
+  background: #008080;
+  font-family: Tahoma, "MS Sans Serif", sans-serif;
+  font-size: 12px;
+  margin: 0;
+  padding: 12px;
+}
+
+.win {
+  background: #c0c0c0;
+  border: 2px solid;
+  border-color: #dfdfdf #000 #000 #dfdfdf;
+  box-shadow: inset -1px -1px #808080, inset 1px 1px #fff;
+}
+
+.titlebar {
+  background: linear-gradient(90deg, #000080, #1084d0);
+  color: #fff;
+  font-weight: bold;
+  padding: 4px 6px;
+}
+
+.toolbar {
+  padding: 4px;
+  border-bottom: 1px solid #808080;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #222;
+}
+
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  background: #000;
+  margin-left: 8px;
+}
+
+.label-legend {
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  color: #222;
+  padding: 3px 6px;
+  border-bottom: 1px solid #808080;
+}
+.label-legend span {
+  background: #000;
+  padding: 0 3px;
+  margin: 0 4px 0 8px;
+}
+
+button {
+  background: #c0c0c0;
+  border: 2px solid;
+  border-color: #fff #808080 #808080 #fff;
+  padding: 3px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+button:active {
+  border-color: #808080 #fff #fff #808080;
+}
+
+.minimap {
+  display: flex;
+  height: 14px;
+  margin: 4px;
+  border: 1px solid;
+  border-color: #808080 #fff #fff #808080;
+  background: #fff;
+  overflow-x: auto;
+}
+.minimap .tick {
+  flex: 0 0 3px;
+  height: 100%;
+}
+
+.pages-container {
+  margin: 4px;
+  padding: 4px;
+  background: #000;
+  border: 1px solid;
+  border-color: #808080 #fff #fff #808080;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.pages-container canvas {
+  display: block;
+}
+
+.statusbar {
+  border-top: 1px solid #808080;
+  padding: 3px 6px;
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  box-shadow: inset 1px 1px #808080;
+}

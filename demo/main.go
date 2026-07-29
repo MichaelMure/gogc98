@@ -1,22 +1,17 @@
-// Command demo is a small allocation-heavy program used to spike-test
-// whether the traceallocfree experiment gives us real addresses and
-// types for a live GC visualization, with zero runtime patches.
+// Command demo is a small allocation-heavy program that shows how to
+// instrument a Go program with gogc98/probe for the gogc98 visualizer
+// to poll.
 //
-// traceallocfree isn't in the //go:debug allowlist, so it must be
-// enabled via GODEBUG=traceallocfree=1 in the environment at launch.
-//
-// The program runs its workload independently of any visualizer. A
-// flight recorder buffers recent trace data in memory; an HTTP
-// endpoint lets a bridge process pull a snapshot whenever it wants,
-// the same pattern net/http/pprof uses.
+// The program runs its workload independently of any visualizer. The
+// probe package buffers recent trace data in memory; an HTTP endpoint
+// lets the gogc98 visualizer pull a snapshot whenever it wants, the
+// same pattern net/http/pprof uses.
 package main
 
 import (
-	"fmt"
-	"net/http"
-	"os"
-	"runtime/trace"
 	"time"
+
+	"gogc98/probe"
 )
 
 // Go's allocator buckets objects into a span purely by size class,
@@ -58,27 +53,7 @@ type byteBlob struct {
 }
 
 func main() {
-	fr := trace.NewFlightRecorder(trace.FlightRecorderConfig{
-		MinAge:   200 * time.Millisecond,
-		MaxBytes: 8 << 20,
-	})
-	if err := fr.Start(); err != nil {
-		fmt.Fprintln(os.Stderr, "flight recorder start:", err)
-		os.Exit(1)
-	}
-
-	http.HandleFunc("/snapshot", func(w http.ResponseWriter, r *http.Request) {
-		if _, err := fr.WriteTo(w); err != nil {
-			fmt.Fprintln(os.Stderr, "snapshot write:", err)
-		}
-	})
-	go func() {
-		fmt.Fprintln(os.Stderr, "demo: snapshot endpoint on :7999/snapshot")
-		if err := http.ListenAndServe("127.0.0.1:7999", nil); err != nil {
-			fmt.Fprintln(os.Stderr, "http serve:", err)
-			os.Exit(1)
-		}
-	}()
+	go probe.Start()
 
 	// The real workload runs regardless of whether a bridge is pulling
 	// snapshots. Keep some objects alive across GC cycles (survivors)

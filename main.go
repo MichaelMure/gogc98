@@ -1,7 +1,8 @@
-// Command bridge pulls periodic flight-recorder trace snapshots from
-// a target program's HTTP endpoint (see ../demo), decodes the
-// traceallocfree experimental events into a live heap model, and
-// serves a Win98-defrag-style visualization of it over a websocket.
+// Command gogc98 pulls periodic flight-recorder trace snapshots from
+// a target program's HTTP endpoint (see ./demo, instrumented via the
+// gogc98/probe package), decodes the traceallocfree experimental
+// events into a live heap model, and serves a Win98-defrag-style
+// visualization of it over a websocket.
 package main
 
 import (
@@ -71,9 +72,12 @@ func consumeSnapshot(state *gcState, r io.Reader) {
 	for {
 		ev, err := tr.ReadEvent()
 		if err != nil {
-			if err != io.EOF {
-				log.Printf("poll: trace read error after %d events: %v", n, err)
-			}
+			// Expected, not just at EOF: the demo's flight recorder can
+			// still be actively writing the newest trace generation when
+			// it hands out a snapshot, so the tail of that generation is
+			// routinely incomplete and unparseable here. Whatever events
+			// were already read this poll are kept; the rest of this
+			// generation arrives fully formed on a later poll.
 			break
 		}
 		if ev.Time() <= since {
@@ -110,8 +114,6 @@ func consumeSnapshot(state *gcState, r io.Reader) {
 	// poll.
 	state.allocRate.sample(now)
 	state.freeRate.sample(now)
-
-	log.Printf("poll: %d new events, %d spans tracked", n, len(state.spans))
 }
 
 type controlMsg struct {

@@ -1,5 +1,4 @@
 .claude
 .idea
-*.log
-*.pid
-/bin
+/gogc98
+/demo/demo

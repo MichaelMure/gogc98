@@ -137,7 +137,7 @@ function borderColor(obj) {
 const CELL = 8;
 
 // serverSlotCap and fadeWindowSeconds are read from each frame
-// (bridge/frame.go's slotCap/fadeWindow) rather than hardcoded here,
+// (frame.go's slotCap/fadeWindow) rather than hardcoded here,
 // so the two sides can't silently drift out of sync. These are just
 // fallback values until the first frame arrives.
 //

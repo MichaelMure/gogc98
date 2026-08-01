@@ -8,16 +8,26 @@ Fill that void you had in your life since you couldn't watch the Windows 98 defr
 
 ## How it works
 
+Go has had for a while extensive tracing in its runtime that can be 
+enabled through the `GODEBUG` environment variable. While this is meant
+to be used for debugging, it can also be used for much sillier things
+like tracking all allocations and GC activity. The other notable part
+is [flight recorder](https://pkg.go.dev/runtime/trace), a sort of ring
+buffer that records those traces, ready to be shipped out of process.
+
 `gogc98` is a small bridge process that polls a target Go program over
-HTTP for periodic [flight recorder](https://pkg.go.dev/runtime/trace)
-trace snapshots, decodes the `traceallocfree` runtime experiment's
-alloc/free/span events plus GC cycle boundaries out of them, and serves
-a live model of the heap over a websocket to a plain HTML/Canvas
-frontend.
+HTTP for periodic flight recorder trace snapshots, decodes the 
+`traceallocfree` runtime experiment's alloc/free/span events plus GC
+cycle boundaries out of them, and serves a live model of the heap over
+a websocket to a plain HTML/Canvas frontend.
 
 The target program only needs one line of instrumentation (see below)
-and one environment variable — everything else runs out-of-process, so
-it adds negligible overhead and can be left in production code.
+and one environment variable — everything else runs out-of-process.
+While the flight recorder minimizes the allocations due to observing
+those events, recording every single allocation is somewhat expensive.
+
+This is meant as a silly educational tool. I'd suggest not using it
+in production.
 
 ## Quick start
 

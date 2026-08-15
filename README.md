@@ -29,7 +29,7 @@ those events, recording every single allocation is somewhat expensive.
 This is meant as a silly educational tool. I'd suggest not using it
 in production.
 
-## Quick start
+## Quick start with the demo program
 
 Requires Go 1.26+.
 
@@ -44,7 +44,15 @@ generator) and the `gogc98` bridge/visualizer against it.
 
 ## Using gogc98 in your own program
 
-Two ways to instrument a program, from least to most invasive.
+First, install the visualizer:
+
+```sh
+go install github.com/MichaelMure/gogc98@latest
+```
+
+Or grab a prebuilt binary from the [releases page](https://github.com/MichaelMure/gogc98/releases).
+
+Two ways to instrument a program:
 
 <details>
 <summary><b>Option 1: import the <code>probe</code> package</b></summary>
